@@ -1,0 +1,153 @@
+#include "mbed.h"
+#include "arm_book_lib.h"
+
+//=== Pin Configuration ===
+DigitalIn gasInput(D2);
+DigitalIn tempInput(D3);
+DigitalIn pinInputs[4] = {DigitalIn(D4), DigitalIn(D5), DigitalIn(D6), DigitalIn(D7)};
+DigitalIn confirmButton(BUTTON1);
+
+DigitalOut statusLed(LED1);
+DigitalOut blockLed(LED2);
+
+//=== System Variables ===
+enum Mode { NORMAL, WARNING, CRITICAL, TIMEOUT };
+Mode mode = NORMAL;
+
+const int accessCode[4] = {1, 2, 3, 4};
+int inputCode[4] = {0};
+int entryIndex = 0;
+int errorCount = 0;
+
+//=== Timers ===
+Timer timeoutClock;
+Timer blinkTimer;
+Timer flashTimer;
+
+//=== Function Prototypes ===
+void clearState();
+void monitorHazards();
+void criticalAlert();
+void lockoutHandler();
+void collectInput();
+
+int main() {
+    // Configure input modes
+    gasInput.mode(PullDown);
+    tempInput.mode(PullDown);
+    for (int i = 0; i < 4; i++) pinInputs[i].mode(PullDown);
+    confirmButton.mode(PullDown);
+
+    // Initial LED state
+    statusLed = OFF;
+    blockLed = OFF;
+
+    while (true) {
+        monitorHazards();
+
+        switch (mode) {
+            case NORMAL:
+                break;
+
+            case WARNING:
+                statusLed = ON;
+                break;
+
+            case CRITICAL:
+                criticalAlert();
+                break;
+
+            case TIMEOUT:
+                lockoutHandler();
+                break;
+        }
+    }
+}
+
+// Reset all system state
+void clearState() {
+    mode = NORMAL;
+    statusLed = OFF;
+    blockLed = OFF;
+    entryIndex = 0;
+    errorCount = 0;
+    timeoutClock.stop();
+    timeoutClock.reset();
+    blinkTimer.stop();
+    blinkTimer.reset();
+    flashTimer.stop();
+    flashTimer.reset();
+}
+
+// Monitor for hazardous conditions
+void monitorHazards() {
+    bool gasDetected = gasInput;
+    bool tempDetected = tempInput;
+
+    if (mode == NORMAL || mode == WARNING) {
+        if (gasDetected && tempDetected) {
+            mode = CRITICAL;
+            flashTimer.start();
+        } else if (gasDetected || tempDetected) {
+            mode = WARNING;
+        }
+    }
+}
+
+// Handle emergency code entry
+void criticalAlert() {
+    // Fast flash LED
+    if (flashTimer.read_ms() % 200 < 100)
+        statusLed = ON;
+    else
+        statusLed = OFF;
+
+    collectInput();
+
+    if (confirmButton) {
+        bool match = true;
+        for (int i = 0; i < 4; i++) {
+            if (inputCode[i] != accessCode[i]) {
+                match = false;
+                break;
+            }
+        }
+
+        if (match) {
+            clearState();
+        } else {
+            errorCount++;
+            if (errorCount >= 5) {
+                mode = TIMEOUT;
+                timeoutClock.start();
+                blinkTimer.start();
+                errorCount = 0;
+            }
+        }
+        entryIndex = 0;
+        ThisThread::sleep_for(200ms);
+    }
+}
+
+// Handle lockout mode
+void lockoutHandler() {
+    if (timeoutClock.read() >= 60) {
+        clearState();
+    } else {
+        if (blinkTimer.read_ms() % 1000 < 500)
+            blockLed = ON;
+        else
+            blockLed = OFF;
+    }
+}
+
+// Input reader for keypad
+void collectInput() {
+    for (int i = 0; i < 4; i++) {
+        if (pinInputs[i] && entryIndex < 4) {
+            inputCode[entryIndex] = i + 1;
+            entryIndex++;
+            ThisThread::sleep_for(200ms); // debounce
+        }
+    }
+}
